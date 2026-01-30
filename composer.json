@@ -1,0 +1,43 @@
+{
+    "name": "narya/php-sdk",
+    "description": "PHP SDK for the Narya Runtime Engine (Go) - Worker, protocol, lifecycle, UDS + MessagePack bridge",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "narya",
+        "runtime",
+        "worker",
+        "php",
+        "uds",
+        "msgpack"
+    ],
+    "authors": [
+        {
+            "name": "Thales Ruppenthal",
+            "email": "thales.rup@gmail.com"
+        }
+    ],
+    "homepage": "https://github.com/EreborCodeForge/narya-php-sdk",
+    "support": {
+        "issues": "https://github.com/EreborCodeForge/narya-php-sdk/issues",
+        "source": "https://github.com/EreborCodeForge/narya-php-sdk"
+    },
+    "require": {
+        "php": ">=8.2",
+        "ext-msgpack": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Narya\\SDK\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Narya\\SDK\\Tests\\": "tests/"
+        }
+    },
+    "minimum-stability": "stable"
+}
