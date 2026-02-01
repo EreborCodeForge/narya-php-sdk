@@ -20,13 +20,24 @@ final class WorkerBridge
     private const MAGIC_HANDSHAKE = 'NARYA1';
     private const HANDSHAKE_OK = 'OK';
     private const MAX_PAYLOAD_SIZE = 10 * 1024 * 1024; // 10MB
-    
+
+    /** Number of normal connection retries (socket may not exist yet). */
+    private const CONNECT_RETRIES = 10;
+    /** Extra retries for orphan worker (No such file or directory). */
+    private const CONNECT_ORPHAN_RETRIES = 2;
+    /** Delay between normal retries (ms). */
+    private const CONNECT_RETRY_DELAY_MS = 500;
+    /** Delay between orphan retries (ms). */
+    private const CONNECT_ORPHAN_DELAY_MS = 200;
+    /** Connection timeout per attempt (seconds). */
+    private const CONNECT_TIMEOUT_S = 2;
+
     /** @var resource|null */
     private $socket;
-    
+
     /** @var callable */
     private $handler;
-    
+
     private string $sockPath;
     private bool $running = false;
     private int $requestCount = 0;
@@ -94,31 +105,79 @@ final class WorkerBridge
     }
 
     /**
-     * Connect to the Unix socket.
+     * Connect to the Unix socket with retry (avoids log spam for orphan / not-ready socket).
      */
     private function connect(): void
     {
         $address = 'unix://' . $this->sockPath;
+        $attempt = 0;
+        $maxAttempts = self::CONNECT_RETRIES;
+        $delayMs = self::CONNECT_RETRY_DELAY_MS;
+        $orphanMode = false;
+        $lastErrno = 0;
+        $lastErrstr = '';
 
-        $socket = @stream_socket_client(
-            $address,
-            $errno,
-            $errstr,
-            10.0, // connection timeout
-            STREAM_CLIENT_CONNECT
-        );
+        $previousHandler = set_error_handler(function (int $errno, string $errstr, string $file, int $line): bool {
+            // Suppress connection warnings during retry to avoid [PHP Error] spam
+            if ($errno === E_WARNING) {
+                $lower = strtolower($errstr);
+                if (str_contains($lower, 'unable to connect') || str_contains($lower, 'no such file or directory')) {
+                    return true; // swallow
+                }
+            }
+            return false; // let other handlers run
+        });
 
-        if ($socket === false) {
+        try {
+            while ($attempt < $maxAttempts) {
+                $socket = @stream_socket_client(
+                    $address,
+                    $errno,
+                    $errstr,
+                    (float) self::CONNECT_TIMEOUT_S,
+                    STREAM_CLIENT_CONNECT
+                );
+
+                if ($socket !== false) {
+                    stream_set_blocking($socket, true);
+                    stream_set_timeout($socket, 30);
+                    $this->socket = $socket;
+                    return;
+                }
+
+                $lastErrno = $errno;
+                $lastErrstr = $errstr;
+                $attempt++;
+
+                if (!$orphanMode && str_contains(strtolower($errstr), 'no such file or directory')) {
+                    $orphanMode = true;
+                    $maxAttempts = $attempt + self::CONNECT_ORPHAN_RETRIES;
+                    $delayMs = self::CONNECT_ORPHAN_DELAY_MS;
+                }
+
+                if ($attempt >= $maxAttempts) {
+                    break;
+                }
+
+                usleep($delayMs * 1000);
+            }
+
             throw new \RuntimeException(
-                "Failed to connect to socket {$address}: [{$errno}] {$errstr}"
+                sprintf(
+                    'Failed to connect to socket %s after %d attempts: [%d] %s',
+                    $address,
+                    $attempt,
+                    $lastErrno,
+                    $lastErrstr
+                )
             );
+        } finally {
+            if ($previousHandler !== null) {
+                set_error_handler($previousHandler);
+            } else {
+                restore_error_handler();
+            }
         }
-
-        // Configure socket
-        stream_set_blocking($socket, true);
-        stream_set_timeout($socket, 30); // 30s default timeout
-        
-        $this->socket = $socket;
     }
 
     /**
