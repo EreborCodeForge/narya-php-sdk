@@ -17,6 +17,7 @@ readonly final class WorkerResponse implements NaryaResponse
         private array $headers = [],
         private string $body = '',
         private string $error = '',
+        private array $meta = [],
     ) {
     }
 
@@ -24,9 +25,15 @@ readonly final class WorkerResponse implements NaryaResponse
         int $status = 200,
         array $headers = [],
         string $body = '',
-        string $error = ''
+        string $error = '',
+        array $meta = []
     ): self {
-        return new self($status, $headers, $body, $error);
+        return new self($status, $headers, $body, $error, $meta);
+    }
+
+    public static function recycle(int $status = 200, array $headers = [], string $body = '', string $error = ''): self
+    {
+        return new self($status, $headers, $body, $error, ['recycle' => true]);
     }
 
     public function getStatus(): int
@@ -51,11 +58,17 @@ readonly final class WorkerResponse implements NaryaResponse
 
     public function toArray(): array
     {
-        return [
+        $data = [
             'status' => $this->status,
             'headers' => $this->headers,
             'body' => $this->body,
             'error' => $this->error,
         ];
+
+        if ($this->meta !== []) {
+            $data['_meta'] = $this->meta;
+        }
+
+        return $data;
     }
 }

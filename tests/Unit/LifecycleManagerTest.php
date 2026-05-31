@@ -2,9 +2,12 @@
 
 declare(strict_types=1);
 
-namespace Narya\SDK\Tests\Lifecycle;
+namespace Narya\SDK\Tests\Unit;
 
+use Narya\SDK\Contracts\NaryaRequest;
+use Narya\SDK\Contracts\NaryaResponse;
 use Narya\SDK\Lifecycle\LifecycleManager;
+use Narya\SDK\Runtime\WorkerRequest;
 use PHPUnit\Framework\TestCase;
 
 final class LifecycleManagerTest extends TestCase
@@ -47,5 +50,33 @@ final class LifecycleManagerTest extends TestCase
         $lifecycle->shutdown();
         $this->assertTrue($called);
         $this->assertFalse($lifecycle->isBooted());
+    }
+
+    public function test_before_and_after_request_callbacks(): void
+    {
+        $beforeCalled = false;
+        $afterCalled = false;
+        $request = WorkerRequest::fromArray(['method' => 'GET', 'path' => '/']);
+
+        $lifecycle = new LifecycleManager();
+        $lifecycle->onBeforeRequest(function (NaryaRequest $req) use (&$beforeCalled, $request) {
+            $beforeCalled = true;
+            $this->assertSame($request->getMethod(), $req->getMethod());
+        });
+        $lifecycle->onAfterRequest(function (
+            NaryaRequest $req,
+            array|NaryaResponse|null $response,
+            ?\Throwable $error
+        ) use (&$afterCalled) {
+            $afterCalled = true;
+            $this->assertNull($error);
+            $this->assertIsArray($response);
+        });
+
+        $lifecycle->beforeRequest($request);
+        $lifecycle->afterRequest($request, ['status' => 200], null);
+
+        $this->assertTrue($beforeCalled);
+        $this->assertTrue($afterCalled);
     }
 }

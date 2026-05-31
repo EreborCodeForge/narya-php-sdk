@@ -7,6 +7,7 @@ namespace Narya\SDK\Runtime;
 use Narya\SDK\Contracts\ApplicationWorker;
 use Narya\SDK\Contracts\LifecycleInterface;
 use Narya\SDK\Contracts\NaryaResponse;
+use Narya\SDK\Contracts\RequestLifecycleInterface;
 use Narya\SDK\Runtime\WorkerRequest;
 
 final class Worker
@@ -18,52 +19,48 @@ final class Worker
     private ?LifecycleInterface $lifecycle = null;
     private bool $initialized = false;
     private int $maxRequests = 10000;
+    private WorkerOptions $options;
+    private WorkerResetter $resetter;
+    private int $handledRequests = 0;
 
     /**
-     * Create a new worker.
-     *
      * @param ApplicationWorker|null $application Application (framework) injected into the worker (optional)
      * @param callable(array):array|null $handler Callable handler (optional; used when application is null)
      * @param int $maxRequests Max requests before recycling (used when run() is called without --max-requests in argv)
      * @param LifecycleInterface|null $lifecycle Lifecycle: boot() before loop, shutdown() on exit (optional)
+     * @param WorkerOptions|null $options Worker tuning options (optional)
      */
     public function __construct(
         ?ApplicationWorker $application = null,
         ?callable $handler = null,
         int $maxRequests = 10000,
         ?LifecycleInterface $lifecycle = null,
+        ?WorkerOptions $options = null,
     ) {
         $this->application = $application;
         $this->handler = $handler;
-        $this->maxRequests = $maxRequests;
+        $this->options = $options ?? new WorkerOptions(maxRequests: $maxRequests);
+        $this->maxRequests = $this->options->maxRequests;
         $this->lifecycle = $lifecycle;
+        $this->resetter = new WorkerResetter($this->options);
     }
 
-    /**
-     * Initialize the worker.
-     */
     public function initialize(): void
     {
         if ($this->initialized) {
             return;
         }
 
-        // Disable output buffering
         while (ob_get_level() > 0) {
             ob_end_clean();
         }
 
-        // Configure error handling
         set_error_handler([$this, 'handleError']);
         set_exception_handler([$this, 'handleException']);
 
         $this->initialized = true;
     }
 
-    /**
-     * Start the worker loop.
-     * Reads --sock and --max-requests from $argv (Narya Runtime contract: php worker.php --sock /path/to.sock).
-     */
     public function run(): void
     {
         $this->initialize();
@@ -73,10 +70,23 @@ final class Worker
             $args->exitWithUsage();
         }
 
+        $runtimeOptions = $this->options->withMaxRequests($args->maxRequests);
+        if ($args->memoryLimitMb > 0) {
+            $runtimeOptions = $runtimeOptions->withMemoryLimitMb($args->memoryLimitMb);
+        }
+        if ($args->socketTimeoutSeconds > 0) {
+            $runtimeOptions = $runtimeOptions->withSocketTimeoutSeconds($args->socketTimeoutSeconds);
+        }
+
         $this->lifecycle?->boot();
 
         try {
-            $this->bridge = new WorkerBridge([$this, 'handleRequest'], $args->sockPath, $args->maxRequests);
+            $this->bridge = new WorkerBridge(
+                [$this, 'handleRequest'],
+                $args->sockPath,
+                $runtimeOptions->maxRequests,
+                $runtimeOptions,
+            );
             $this->bridge->run();
         } finally {
             $this->lifecycle?->shutdown();
@@ -84,17 +94,23 @@ final class Worker
     }
 
     /**
-     * Main request handler (Narya protocol: array in → array out with status, headers, body, error).
-     *
      * @param array $request MessagePack request from Go
      * @return array Response to Go (Bridge adds id and _meta)
      */
     public function handleRequest(array $request): array
     {
+        $naryaRequest = WorkerRequest::fromArray($request);
+        $response = null;
+        $error = null;
+
         try {
+            if ($this->lifecycle instanceof RequestLifecycleInterface) {
+                $this->lifecycle->beforeRequest($naryaRequest);
+            }
+
             if ($this->application !== null) {
-                $result = $this->application->handle(WorkerRequest::fromArray($request));
-                return $result instanceof NaryaResponse ? $result->toArray() : $result;
+                $response = $this->application->handle($naryaRequest);
+                return $response instanceof NaryaResponse ? $response->toArray() : $response;
             }
 
             if ($this->handler !== null) {
@@ -102,14 +118,18 @@ final class Worker
             }
 
             return $this->handleSimple($request);
+        } catch (\Throwable $e) {
+            $error = $e;
+            throw $e;
         } finally {
+            if ($this->lifecycle instanceof RequestLifecycleInterface) {
+                $this->lifecycle->afterRequest($naryaRequest, $response, $error);
+            }
+
             $this->reset();
         }
     }
 
-    /**
-     * Simple handler without framework (default Narya response).
-     */
     private function handleSimple(array $request): array
     {
         $method = $request['method'] ?? 'GET';
@@ -131,38 +151,22 @@ final class Worker
         ];
     }
 
-    /**
-     * Reset state between requests.
-     */
     private function reset(): void
     {
-        $_GET = [];
-        $_POST = [];
-        $_REQUEST = [];
-        $_COOKIE = [];
-        $_FILES = [];
-        $_SERVER = array_filter($_SERVER, fn ($k) => str_starts_with($k, 'PHP_'), ARRAY_FILTER_USE_KEY);
+        $this->handledRequests++;
 
-        if (function_exists('header_remove')) {
-            header_remove();
+        if ($this->options->gcInterval > 1 && ($this->handledRequests % $this->options->gcInterval) !== 0) {
+            (new WorkerResetter($this->options->withoutMemoryCacheGc()))->reset($this->application);
+            return;
         }
 
-        if ($this->application !== null) {
-            $this->application->reset();
-        }
-
-        gc_collect_cycles();
+        $this->resetter->reset($this->application);
     }
 
-    /**
-     * PHP error handler.
-     */
     public function handleError(int $errno, string $errstr, string $errfile, int $errline): bool
     {
-        // Log error to stderr
         fwrite(STDERR, "[PHP Error] {$errstr} in {$errfile}:{$errline}\n");
-        
-        // Convert to exception if fatal error
+
         if ($errno & (E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR)) {
             throw new \ErrorException($errstr, 0, $errno, $errfile, $errline);
         }
@@ -170,50 +174,32 @@ final class Worker
         return true;
     }
 
-    /**
-     * Uncaught exception handler.
-     */
     public function handleException(\Throwable $e): void
     {
         fwrite(STDERR, "[PHP Exception] {$e->getMessage()} in {$e->getFile()}:{$e->getLine()}\n");
         fwrite(STDERR, $e->getTraceAsString() . "\n");
     }
 
-    /**
-     * Set the application (framework) injected into the worker.
-     */
     public function setApplication(ApplicationWorker $application): void
     {
         $this->application = $application;
     }
 
-    /**
-     * Get the injected application (null if none).
-     */
     public function getApplication(): ?ApplicationWorker
     {
         return $this->application;
     }
 
-    /**
-     * Set the lifecycle (boot before loop, shutdown on exit).
-     */
     public function setLifecycle(LifecycleInterface $lifecycle): void
     {
         $this->lifecycle = $lifecycle;
     }
 
-    /**
-     * Get the injected lifecycle (null if none).
-     */
     public function getLifecycle(): ?LifecycleInterface
     {
         return $this->lifecycle;
     }
 
-    /**
-     * Get the number of requests processed.
-     */
     public function getRequestCount(): int
     {
         return $this->bridge?->getRequestCount() ?? 0;

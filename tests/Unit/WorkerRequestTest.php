@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Narya\SDK\Tests\Runtime;
+namespace Narya\SDK\Tests\Unit;
 
 use Narya\SDK\Runtime\WorkerRequest;
 use PHPUnit\Framework\TestCase;
@@ -61,5 +61,25 @@ final class WorkerRequestTest extends TestCase
         $this->assertSame('http', $req->getScheme());
         $this->assertSame(0, $req->getTimeoutMs());
         $this->assertSame(0, $req->getWorkerId());
+    }
+
+    public function testBodyArrayOfBytesIsConvertedToString(): void
+    {
+        $req = WorkerRequest::fromArray(['body' => [72, 101, 108, 108, 111]]);
+
+        $this->assertSame('Hello', $req->getBody());
+    }
+
+    public function testBodyArrayOfBytesHandlesLargePayload(): void
+    {
+        $bytes = range(0, 255);
+        $expected = '';
+        foreach ($bytes as $byte) {
+            $expected .= chr($byte);
+        }
+
+        $req = WorkerRequest::fromArray(['body' => $bytes]);
+
+        $this->assertSame($expected, $req->getBody());
     }
 }

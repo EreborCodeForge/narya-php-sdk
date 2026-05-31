@@ -140,11 +140,54 @@ If your application already uses a DI container:
 
 So: **clearing context on each request** → inside **`reset()`**, not in shutdown. See a full example in `examples/worker_with_container.php`.
 
+## Laravel Worker Safety
+
+For Laravel persistent workers, use conservative limits first:
+
+```php
+use Narya\SDK\Runtime\Worker;
+use Narya\SDK\Runtime\WorkerOptions;
+
+$options = new WorkerOptions(
+    maxRequests: (int) getenv('NARYA_MAX_REQUESTS') ?: 300,
+    memoryLimitMb: (int) getenv('NARYA_MEMORY_LIMIT_MB') ?: 256,
+    socketTimeoutSeconds: 30,
+    gcInterval: 10,
+);
+
+$laravelWorker = new LaravelNaryaWorker($kernel, enableTerminate: true);
+
+(new Worker(
+    application: $laravelWorker,
+    options: $options,
+))->run();
+```
+
+Recommended Laravel reset checklist in `ApplicationWorker::reset()`:
+
+- forget current request instance;
+- clear scoped container instances;
+- clear resolved Facades;
+- optionally call `Kernel::terminate`;
+- clear output buffers (handled by SDK when `resetOutputBuffersAfterRequest` is true);
+- run GC periodically via `gcInterval`.
+
+Suggested env vars for tuning:
+
+```env
+NARYA_MAX_REQUESTS=300
+NARYA_MEMORY_LIMIT_MB=512
+NARYA_GC_INTERVAL=10
+NARYA_SOCKET_TIMEOUT=30
+```
+
 ## Tests
 
 ```bash
 composer install
 ./vendor/bin/phpunit
+./vendor/bin/phpunit --testsuite Unit
+./vendor/bin/phpunit --testsuite Integration
 ```
 
 ## License
