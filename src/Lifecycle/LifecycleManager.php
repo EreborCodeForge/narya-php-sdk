@@ -5,18 +5,26 @@ declare(strict_types=1);
 namespace Narya\SDK\Lifecycle;
 
 use Narya\SDK\Contracts\LifecycleInterface;
+use Narya\SDK\Contracts\NaryaRequest;
+use Narya\SDK\Contracts\NaryaResponse;
+use Narya\SDK\Contracts\RequestLifecycleInterface;
 
 /**
- * Manages worker lifecycle (boot, shutdown).
- * Useful for frameworks to register callbacks before/after the loop.
+ * Manages worker lifecycle (boot, shutdown) and optional per-request hooks.
  */
-final class LifecycleManager implements LifecycleInterface
+final class LifecycleManager implements RequestLifecycleInterface
 {
     /** @var list<callable(): void> */
     private array $bootCallbacks = [];
 
     /** @var list<callable(): void> */
     private array $shutdownCallbacks = [];
+
+    /** @var list<callable(NaryaRequest): void> */
+    private array $beforeRequestCallbacks = [];
+
+    /** @var list<callable(NaryaRequest, array|NaryaResponse|null, ?\Throwable): void> */
+    private array $afterRequestCallbacks = [];
 
     private bool $booted = false;
 
@@ -39,6 +47,20 @@ final class LifecycleManager implements LifecycleInterface
         $this->booted = false;
     }
 
+    public function beforeRequest(NaryaRequest $request): void
+    {
+        foreach ($this->beforeRequestCallbacks as $cb) {
+            $cb($request);
+        }
+    }
+
+    public function afterRequest(NaryaRequest $request, array|NaryaResponse|null $response, ?\Throwable $error): void
+    {
+        foreach ($this->afterRequestCallbacks as $cb) {
+            $cb($request, $response, $error);
+        }
+    }
+
     public function onBoot(callable $callback): self
     {
         $this->bootCallbacks[] = $callback;
@@ -48,6 +70,18 @@ final class LifecycleManager implements LifecycleInterface
     public function onShutdown(callable $callback): self
     {
         $this->shutdownCallbacks[] = $callback;
+        return $this;
+    }
+
+    public function onBeforeRequest(callable $callback): self
+    {
+        $this->beforeRequestCallbacks[] = $callback;
+        return $this;
+    }
+
+    public function onAfterRequest(callable $callback): self
+    {
+        $this->afterRequestCallbacks[] = $callback;
         return $this;
     }
 

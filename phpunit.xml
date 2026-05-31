@@ -1,12 +1,46 @@
 <?xml version="1.0" encoding="UTF-8"?>
+
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+
          xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.0/phpunit.xsd"
+
          bootstrap="vendor/autoload.php"
+
          colors="true"
+         beStrictAboutOutputDuringTests="false"
          cacheDirectory=".phpunit.cache">
+
     <testsuites>
-        <testsuite name="Narya SDK Test Suite">
-            <directory>tests</directory>
+
+        <testsuite name="Unit">
+
+            <directory>tests/Unit</directory>
+
         </testsuite>
+
+        <testsuite name="Integration">
+
+            <directory>tests/Integration</directory>
+
+        </testsuite>
+
+        <testsuite name="Narya SDK Test Suite">
+
+            <directory>tests</directory>
+
+            <exclude>tests/Unit</exclude>
+
+            <exclude>tests/Integration</exclude>
+
+            <exclude>tests/fixtures</exclude>
+
+            <exclude>tests/stress</exclude>
+
+            <exclude>tests/Support</exclude>
+
+        </testsuite>
+
     </testsuites>
+
 </phpunit>
+

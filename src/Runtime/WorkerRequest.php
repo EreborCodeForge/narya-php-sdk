@@ -38,17 +38,7 @@ readonly final class WorkerRequest implements NaryaRequest
      */
     public static function fromArray(array $data): self
     {
-        $body = $data['body'] ?? '';
-        if (is_string($body)) {
-            // already string
-        } elseif (is_array($body)) {
-            $body = ''; // MessagePack may deserialize bytes as array of ints
-            foreach ($data['body'] as $byte) {
-                $body .= chr($byte);
-            }
-        } else {
-            $body = (string) $body;
-        }
+        $body = self::normalizeBody($data['body'] ?? '');
 
         return new self(
             id: (int) ($data['id'] ?? 0),
@@ -151,5 +141,38 @@ readonly final class WorkerRequest implements NaryaRequest
     public function getRaw(): array
     {
         return $this->raw;
+    }
+
+    private static function normalizeBody(mixed $body): string
+    {
+        if (is_string($body)) {
+            return $body;
+        }
+
+        if (!is_array($body)) {
+            return (string) $body;
+        }
+
+        if ($body === []) {
+            return '';
+        }
+
+        $chunks = [];
+        $chunk = '';
+
+        foreach ($body as $i => $byte) {
+            $chunk .= chr((int) $byte);
+
+            if (($i % 8192) === 0 && $chunk !== '') {
+                $chunks[] = $chunk;
+                $chunk = '';
+            }
+        }
+
+        if ($chunk !== '') {
+            $chunks[] = $chunk;
+        }
+
+        return implode('', $chunks);
     }
 }
