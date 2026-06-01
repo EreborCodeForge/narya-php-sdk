@@ -4,11 +4,7 @@ declare(strict_types=1);
 
 namespace Narya\SDK\Runtime;
 
-use Narya\SDK\Contracts\ApplicationWorker;
-use Narya\SDK\Contracts\LifecycleInterface;
-use Narya\SDK\Contracts\NaryaResponse;
-use Narya\SDK\Contracts\RequestLifecycleInterface;
-use Narya\SDK\Runtime\WorkerRequest;
+use Narya\SDK\Protocol\FrameCodec;
 use Throwable;
 
 final class WorkerBridge
@@ -35,12 +31,13 @@ final class WorkerBridge
 
     private string $sockPath;
     private bool $running = false;
+    private bool $handshakeComplete = false;
     private int $requestCount = 0;
     private int $maxRequests = 10000;
     private WorkerOptions $options;
     private MemoryGuard $memoryGuard;
     private SocketTimeoutResolver $timeoutResolver;
-    private \Narya\SDK\Protocol\FrameCodec $frameCodec;
+    private FrameCodec $frameCodec;
 
     /**
      * @param callable $handler Function that receives array request and returns array response
@@ -57,7 +54,7 @@ final class WorkerBridge
         $this->options = $options ?? new WorkerOptions(maxRequests: $maxRequests);
         $this->memoryGuard = new MemoryGuard($this->options);
         $this->timeoutResolver = new SocketTimeoutResolver($this->options);
-        $this->frameCodec = new \Narya\SDK\Protocol\FrameCodec();
+        $this->frameCodec = new FrameCodec();
     }
 
     private function ensureMsgpackAvailable(): void
@@ -89,9 +86,19 @@ final class WorkerBridge
 
     public function run(): void
     {
+        $this->connectAndHandshake();
+        $this->serve();
+    }
+
+    public function connectAndHandshake(): void
+    {
         $this->ensureMsgpackAvailable();
         $this->connect();
         $this->handshake();
+    }
+
+    public function serve(): void
+    {
         $this->loop();
     }
 
@@ -112,6 +119,7 @@ final class WorkerBridge
                     return true;
                 }
             }
+
             return false;
         });
 
@@ -129,6 +137,7 @@ final class WorkerBridge
                     stream_set_blocking($socket, true);
                     stream_set_timeout($socket, $this->options->socketTimeoutSeconds);
                     $this->socket = $socket;
+
                     return;
                 }
 
@@ -169,16 +178,25 @@ final class WorkerBridge
 
     private function handshake(): void
     {
-        $magic = fread($this->socket, strlen(self::MAGIC_HANDSHAKE));
+        $expectedLen = strlen(self::MAGIC_HANDSHAKE);
+        $magic = $this->frameCodec->readExact($this->socket, $expectedLen);
 
-        if ($magic !== self::MAGIC_HANDSHAKE) {
+        if ($magic === null) {
             throw new \RuntimeException(
-                'Invalid handshake: expected ' . self::MAGIC_HANDSHAKE . ", got {$magic}"
+                'Invalid handshake: expected ' . self::MAGIC_HANDSHAKE . ', got (EOF before handshake)'
             );
         }
 
-        fwrite($this->socket, self::HANDSHAKE_OK);
-        fflush($this->socket);
+        if ($magic !== self::MAGIC_HANDSHAKE) {
+            $display = $magic === '' ? '' : $magic;
+            throw new \RuntimeException(
+                'Invalid handshake: expected ' . self::MAGIC_HANDSHAKE
+                . ', got "' . $display . '" (' . strlen($magic) . ' bytes)'
+            );
+        }
+
+        $this->frameCodec->writeExact($this->socket, self::HANDSHAKE_OK);
+        $this->handshakeComplete = true;
     }
 
     private function loop(): void
@@ -196,10 +214,14 @@ final class WorkerBridge
                 }
 
                 $this->requestCount++;
-                $this->applySocketTimeout($request);
 
-                $response = $this->processRequest($request);
-                $this->writeResponse($response);
+                try {
+                    $this->applySocketTimeout($request);
+                    $response = $this->processRequest($request);
+                    $this->writeResponse($response);
+                } finally {
+                    $this->restoreDefaultSocketTimeout();
+                }
 
                 $shouldRecycle = $this->requestCount >= $this->maxRequests
                     || $this->memoryGuard->shouldRecycle();
@@ -208,6 +230,11 @@ final class WorkerBridge
                     $this->running = false;
                 }
             } catch (Throwable $e) {
+                if ($request === null || !$this->canWriteToSocket()) {
+                    fwrite(STDERR, "[FATAL] Request loop error: {$e->getMessage()}\n");
+                    break;
+                }
+
                 try {
                     $shouldRecycle = $this->requestCount >= $this->maxRequests
                         || $this->memoryGuard->shouldRecycle();
@@ -235,16 +262,31 @@ final class WorkerBridge
         $this->close();
     }
 
+    private function canWriteToSocket(): bool
+    {
+        return $this->handshakeComplete && $this->socket !== null && !feof($this->socket);
+    }
+
     private function applySocketTimeout(array $request): void
     {
         $timeoutSec = $this->timeoutResolver->resolve($request);
         stream_set_timeout($this->socket, $timeoutSec);
     }
 
+    private function restoreDefaultSocketTimeout(): void
+    {
+        if ($this->socket === null) {
+            return;
+        }
+
+        stream_set_timeout($this->socket, $this->timeoutResolver->defaultSeconds());
+    }
+
     private function readRequest(): ?array
     {
         $this->ensureMsgpackAvailable();
         $payload = $this->frameCodec->readFrame($this->socket);
+
         if ($payload === null) {
             return null;
         }

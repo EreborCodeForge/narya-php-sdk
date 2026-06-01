@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Narya\SDK\Tests\Unit;
 
 use Narya\SDK\Protocol\FrameCodec;
+use Narya\SDK\Tests\Support\EofWriteStreamWrapper;
 use Narya\SDK\Tests\Support\PartialWriteStreamWrapper;
 use Narya\SDK\Tests\Support\TimeoutReadStreamWrapper;
 use PHPUnit\Framework\TestCase;
@@ -99,6 +100,17 @@ final class FrameCodecTest extends TestCase
             fclose($client);
             fclose($server);
         }
+    }
+
+    public function testWriteExactThrowsWhenSocketClosed(): void
+    {
+        $stream = EofWriteStreamWrapper::open();
+        $this->assertIsResource($stream);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Socket closed while writing');
+
+        $this->codec->writeExact($stream, 'payload');
     }
 
     public function testRoundTripFrame(): void

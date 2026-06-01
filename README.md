@@ -10,11 +10,11 @@ Protocol: **UDS (Unix Domain Sockets)** + **MessagePack**, handshake `NARYA1`/`O
 | Component | Description |
 |-----------|-------------|
 | **Worker** (`Runtime\Worker`) | Orchestrates the loop: receives request from Go, calls application or handler, sends response. Resets state between requests. |
-| **WorkerBridge** (`Runtime\WorkerBridge`) | UDS + MessagePack bridge: handshake, read/write frames, invokes handler. |
+| **WorkerBridge** (`Runtime\WorkerBridge`) | UDS + MessagePack bridge: `connectAndHandshake()`, request loop (`serve()`), read/write frames. |
 | **NaryaRequest** / **WorkerRequest** | Request contract and implementation (id, method, uri, path, query, headers, body, remote_addr, host, scheme, timeout_ms, meta, worker_id, runtime_version). |
 | **NaryaResponse** / **WorkerResponse** | Response contract and implementation (status, headers, body, error). The Bridge adds `id` and `_meta`. |
 | **ApplicationWorker** | Application (framework) contract: `handle(NaryaRequest): array|NaryaResponse` and `reset()`. |
-| **LifecycleInterface** / **LifecycleManager** | Worker lifecycle: `boot()` before the loop (e.g. connect to socket), `shutdown()` on exit (max_requests or EOF). Passed as Worker’s 4th argument or via `setLifecycle()`. |
+| **LifecycleInterface** / **LifecycleManager** | Worker lifecycle: `boot()` **after** UDS handshake with Go, `shutdown()` on exit (max_requests or EOF). Passed as Worker’s 4th argument or via `setLifecycle()`. |
 
 ## Requirements
 
@@ -62,14 +62,14 @@ $app = new class () implements ApplicationWorker {
 (new Worker($app))->run();
 ```
 
-With lifecycle (boot before the loop, shutdown on exit):
+With lifecycle (`boot()` after handshake, `shutdown()` on exit):
 
 ```php
 use Narya\SDK\Lifecycle\LifecycleManager;
 
 $lifecycle = new LifecycleManager();
 
-// Run once when the worker starts (before connecting to the socket)
+// Run once after the UDS handshake (heavy bootstrap belongs here, not before connect)
 $lifecycle->onBoot(function (): void {
     // e.g. open persistent DB connection, warm cache, load config
     // MyApp::connectDb();
@@ -133,7 +133,7 @@ $handler = function (array $request): array {
 
 If your application already uses a DI container:
 
-- **boot()** — Configure the container once when the worker starts (bindings, persistent connections).
+- **boot()** — Configure the container once after the UDS handshake (bindings, persistent connections).
 - **ApplicationWorker** — Receive the container in the constructor and use it in `handle()` to resolve services.
 - **reset()** — **Here you clear the per-request context (ctx)**: request-scoped container state (e.g. `$container->resetRequestScope()`). The Worker calls `reset()` after **each** request.
 - **shutdown()** — Cleanup when the worker exits (close connections, flush logs). Called **once** when leaving the loop.
@@ -141,6 +141,47 @@ If your application already uses a DI container:
 So: **clearing context on each request** → inside **`reset()`**, not in shutdown. See a full example in `examples/worker_with_container.php`.
 
 ## Laravel Worker Safety
+
+The worker connects and completes the `NARYA1`/`OK` handshake **before** `boot()` runs, so Laravel bootstrap does not block spawn. Use `LifecycleManager::onBoot()` for `bootstrap/app.php` and set the application on the worker inside that callback.
+
+Per-request `timeout_ms` from Go is applied for that request only; the socket timeout is restored to `WorkerOptions.socketTimeoutSeconds` before the next frame.
+
+Example entry script (`worker-laravel.php` in your app root; set `php.worker_script: worker-laravel.php` in `nry.yaml`):
+
+```php
+<?php
+
+declare(strict_types=1);
+
+require __DIR__ . '/vendor/autoload.php';
+
+use Narya\SDK\Lifecycle\LifecycleManager;
+use Narya\SDK\Runtime\Worker;
+use Narya\SDK\Runtime\WorkerOptions;
+
+$options = new WorkerOptions(
+    maxRequests: (int) (getenv('NARYA_MAX_REQUESTS') ?: 300),
+    memoryLimitMb: (int) (getenv('NARYA_MEMORY_LIMIT_MB') ?: 256),
+    socketTimeoutSeconds: (int) (getenv('NARYA_SOCKET_TIMEOUT') ?: 30),
+    gcInterval: (int) (getenv('NARYA_GC_INTERVAL') ?: 10),
+);
+
+$lifecycle = new LifecycleManager();
+$worker = new Worker(null, null, $options->maxRequests, $lifecycle, $options);
+
+$lifecycle->onBoot(static function () use ($worker): void {
+    $laravel = require __DIR__ . '/bootstrap/app.php';
+    $laravel->bootstrapWith([
+        // same bootstrappers as public/index.php or Octane
+    ]);
+    $kernel = $laravel->make(\Illuminate\Contracts\Http\Kernel::class);
+    $worker->setApplication(new LaravelNaryaWorker($kernel, enableTerminate: true));
+});
+
+$worker->run();
+```
+
+See `examples/worker-laravel.php` for a copy-paste template.
 
 For Laravel persistent workers, use conservative limits first:
 
@@ -155,12 +196,14 @@ $options = new WorkerOptions(
     gcInterval: 10,
 );
 
-$laravelWorker = new LaravelNaryaWorker($kernel, enableTerminate: true);
+$lifecycle = new LifecycleManager();
+$worker = new Worker(null, null, $options->maxRequests, $lifecycle, $options);
 
-(new Worker(
-    application: $laravelWorker,
-    options: $options,
-))->run();
+$lifecycle->onBoot(static function () use ($worker): void {
+  // bootstrap Laravel and $worker->setApplication(...)
+});
+
+$worker->run();
 ```
 
 Recommended Laravel reset checklist in `ApplicationWorker::reset()`:

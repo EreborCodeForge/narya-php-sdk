@@ -10,7 +10,7 @@ use Narya\SDK\Contracts\NaryaResponse;
 use Narya\SDK\Contracts\RequestLifecycleInterface;
 
 /**
- * Manages worker lifecycle (boot, shutdown) and optional per-request hooks.
+ * Manages worker lifecycle (boot after handshake, shutdown on exit) and optional per-request hooks.
  */
 final class LifecycleManager implements RequestLifecycleInterface
 {

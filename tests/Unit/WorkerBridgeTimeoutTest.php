@@ -10,6 +10,13 @@ use PHPUnit\Framework\TestCase;
 
 final class WorkerBridgeTimeoutTest extends TestCase
 {
+    public function testDefaultSecondsReturnsWorkerOptionsValue(): void
+    {
+        $resolver = new SocketTimeoutResolver(new WorkerOptions(socketTimeoutSeconds: 30));
+
+        $this->assertSame(30, $resolver->defaultSeconds());
+    }
+
     public function testTimeoutFallsBackToDefaultWhenRequestDoesNotDefineTimeout(): void
     {
         $resolver = new SocketTimeoutResolver(new WorkerOptions(socketTimeoutSeconds: 30));

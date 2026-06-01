@@ -11,6 +11,11 @@ final readonly class SocketTimeoutResolver
     ) {
     }
 
+    public function defaultSeconds(): int
+    {
+        return $this->options->socketTimeoutSeconds;
+    }
+
     public function resolve(array $request): int
     {
         $timeoutSec = $this->options->socketTimeoutSeconds;

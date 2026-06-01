@@ -27,7 +27,7 @@ final class Worker
      * @param ApplicationWorker|null $application Application (framework) injected into the worker (optional)
      * @param callable(array):array|null $handler Callable handler (optional; used when application is null)
      * @param int $maxRequests Max requests before recycling (used when run() is called without --max-requests in argv)
-     * @param LifecycleInterface|null $lifecycle Lifecycle: boot() before loop, shutdown() on exit (optional)
+     * @param LifecycleInterface|null $lifecycle Lifecycle: boot() after handshake, shutdown() on exit (optional)
      * @param WorkerOptions|null $options Worker tuning options (optional)
      */
     public function __construct(
@@ -78,16 +78,17 @@ final class Worker
             $runtimeOptions = $runtimeOptions->withSocketTimeoutSeconds($args->socketTimeoutSeconds);
         }
 
-        $this->lifecycle?->boot();
+        $this->bridge = new WorkerBridge(
+            [$this, 'handleRequest'],
+            $args->sockPath,
+            $runtimeOptions->maxRequests,
+            $runtimeOptions,
+        );
 
         try {
-            $this->bridge = new WorkerBridge(
-                [$this, 'handleRequest'],
-                $args->sockPath,
-                $runtimeOptions->maxRequests,
-                $runtimeOptions,
-            );
-            $this->bridge->run();
+            $this->bridge->connectAndHandshake();
+            $this->lifecycle?->boot();
+            $this->bridge->serve();
         } finally {
             $this->lifecycle?->shutdown();
         }

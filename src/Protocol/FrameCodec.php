@@ -66,6 +66,12 @@ final class FrameCodec
             $chunk = fwrite($stream, substr($data, $written));
 
             if ($chunk === false) {
+                $meta = stream_get_meta_data($stream);
+
+                if (!empty($meta['eof'])) {
+                    throw new \RuntimeException('Socket closed while writing');
+                }
+
                 throw new \RuntimeException('Failed to write to socket');
             }
 
